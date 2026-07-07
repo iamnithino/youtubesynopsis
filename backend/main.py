@@ -2,6 +2,7 @@
 
 import datetime
 import os
+import re
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
@@ -35,27 +36,46 @@ from security import (
 load_dotenv()
 
 DEFAULT_CORS_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    
+    "https://youtubesynopsis.vercel.app",
 ]
 
 
-def _cors_origins() -> list[str]:
+DEFAULT_CORS_ORIGIN_PATTERNS = [
+    "https://youtubesynopsis.vercel.app",
+]
+
+
+def _origin_pattern_to_regex(origin_pattern: str) -> str:
+    return re.escape(origin_pattern).replace(r"\*", r"[^/]*")
+
+
+def _cors_config() -> tuple[list[str], str | None]:
     configured = os.getenv("CORS_ORIGINS", "").strip()
-    if not configured:
-        return DEFAULT_CORS_ORIGINS
-    return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    entries = [*DEFAULT_CORS_ORIGINS, *DEFAULT_CORS_ORIGIN_PATTERNS]
+    entries.extend(origin.strip() for origin in configured.split(",") if origin.strip())
+
+    origins: list[str] = []
+    patterns: list[str] = []
+    for entry in entries:
+        if "*" in entry:
+            patterns.append(_origin_pattern_to_regex(entry))
+        elif entry not in origins:
+            origins.append(entry)
+
+    allow_origin_regex = f"^({'|'.join(patterns)})$" if patterns else None
+    return origins, allow_origin_regex
+
+
+cors_origins, cors_origin_regex = _cors_config()
 
 
 app = FastAPI(title="AI Video Synopsis Generator API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
+    allow_origins=cors_origins,
+    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -724,5 +744,3 @@ async def improve_slide(
         return {"slide": slide}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
