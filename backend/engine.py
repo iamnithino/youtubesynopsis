@@ -545,8 +545,6 @@ def get_video_transcript(youtube_url: str, *, prefer_service: bool = True) -> di
             last_error = exc
             errors.append(f"{name}: {exc}")
             logger.warning("Transcript provider failed (%s): %s", name, exc)
-            if exc.status_code == 422:
-                raise
         except Exception as exc:
             errors.append(f"{name}: {exc}")
             logger.warning("Transcript provider crashed (%s): %s", name, exc)
@@ -780,4 +778,3 @@ async def improve_slide_content(slide: dict[str, Any], context: Optional[dict[st
         slot="presentation",
     )
     return data.get("slide", slide)
-

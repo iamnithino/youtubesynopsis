@@ -15,6 +15,11 @@ const PROXY_URL = (
 ).trim();
 
 const proxyAgent = PROXY_URL ? new ProxyAgent(PROXY_URL) : null;
+const YOUTUBE_HEADERS = {
+  "user-agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+  "accept-language": "en-US,en;q=0.9",
+};
 
 function proxyFetch(url, init = {}) {
   if (!proxyAgent) {
@@ -78,6 +83,81 @@ function mapErrorStatus(message) {
   return 502;
 }
 
+function cleanCaptionText(text) {
+  return String(text || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseJson3Captions(raw) {
+  const payload = JSON.parse(raw);
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  return events
+    .map((event) => {
+      const text = cleanCaptionText(
+        Array.isArray(event?.segs) ? event.segs.map((seg) => seg?.utf8 || "").join("") : "",
+      );
+      if (!text) {
+        return null;
+      }
+      return {
+        start: Number(event.tStartMs || 0) / 1000,
+        dur: Number(event.dDurationMs || 0) / 1000,
+        text,
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchTimedTextCaptions(videoId, lang) {
+  const languages = [...new Set([lang, "en", "en-US", "en-GB"])];
+  const endpoints = ["https://video.google.com/timedtext", "https://www.youtube.com/api/timedtext"];
+
+  for (const endpoint of endpoints) {
+    for (const language of languages) {
+      for (const kind of ["", "asr"]) {
+        const params = new URLSearchParams({
+          v: videoId,
+          lang: language,
+          fmt: "json3",
+        });
+        if (kind) {
+          params.set("kind", kind);
+        }
+
+        const response = await proxyFetch(`${endpoint}?${params}`, {
+          headers: YOUTUBE_HEADERS,
+        });
+        if (!response.ok) {
+          continue;
+        }
+
+        const raw = await response.text();
+        if (!raw.trim()) {
+          continue;
+        }
+
+        try {
+          const subtitles = parseJson3Captions(raw);
+          if (subtitles.length) {
+            return subtitles;
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+
+  return [];
+}
+
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -96,6 +176,25 @@ app.post("/transcript", requireServiceAuth, async (req, res) => {
   }
 
   try {
+    const directSubtitles = await fetchTimedTextCaptions(videoId, lang);
+    if (directSubtitles.length) {
+      const last = directSubtitles[directSubtitles.length - 1];
+      const duration = last
+        ? Math.ceil(Number(last.start || 0) + Number(last.dur || 0))
+        : null;
+
+      return res.json({
+        video_id: videoId,
+        title: "YouTube Video",
+        channel: "",
+        description: "",
+        duration,
+        thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+        subtitles: directSubtitles,
+        source: "youtube-timedtext",
+      });
+    }
+
     const details = await getVideoDetails({
       videoID: videoId,
       lang,
