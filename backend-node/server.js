@@ -487,10 +487,12 @@ async function generateDirectYouTubeSummary(youtubeUrl, mode = "normal", customP
   const guidance = customPrompt || mode || "normal";
   const prompt =
     `Analyze this YouTube video directly and write in ${outputLanguage}. Purpose/mode: ${guidance}.\n` +
-    "Return only valid JSON with keys: title, summary, keywords, chapters, key_points, questions, action_items.\n" +
+    "Return only valid JSON with keys: title, summary, keywords, chapters, caption_summaries, key_points, questions, action_items, transcript_notes.\n" +
     "summary: clear markdown summary. keywords: 6 strings. chapters: 4-8 objects with title,time,summary. " +
+    "caption_summaries: 4-8 objects with start_time,end_time,summary,text for the most important moments. " +
     "key_points: 6-10 strings. questions: 5 objects with type,question,answer,options,correct_answer. " +
-    "action_items: 3-8 strings. If exact timestamps are unavailable, use approximate chapter labels.";
+    "action_items: 3-8 strings. transcript_notes: concise detailed notes that can be shown when exact captions are unavailable. " +
+    "If exact timestamps are unavailable, use approximate timestamp ranges like 00:00 - 00:30.";
 
   let response;
   const errors = [];
@@ -541,9 +543,11 @@ async function generateDirectYouTubeSummary(youtubeUrl, mode = "normal", customP
     summary: data.summary || "Summary generated from the YouTube video.",
     keywords: asArray(data.keywords),
     chapters: asArray(data.chapters),
+    caption_summaries: asArray(data.caption_summaries),
     key_points: asArray(data.key_points),
     questions: asArray(data.questions),
     action_items: asArray(data.action_items),
+    transcript_notes: data.transcript_notes || "",
   };
 }
 
@@ -552,6 +556,57 @@ function summarizeWindows(windows) {
     ...window,
     summary: cleanText(window.text).split(/[.!?]/)[0]?.slice(0, 180) || cleanText(window.text).slice(0, 180),
   }));
+}
+
+function fallbackCaptionSummaries(generated) {
+  const directCaptions = asArray(generated.caption_summaries)
+    .map((item, index) => ({
+      start_seconds: index * 30,
+      end_seconds: index * 30 + 30,
+      start_time: item.start_time || item.time || secondsToTime(index * 30),
+      end_time: item.end_time || secondsToTime(index * 30 + 30),
+      captions: [],
+      text: item.text || item.summary || "",
+      summary: item.summary || item.text || "",
+    }))
+    .filter((item) => item.summary || item.text);
+
+  if (directCaptions.length) return directCaptions;
+
+  const chapterCaptions = asArray(generated.chapters)
+    .map((chapter, index) => ({
+      start_seconds: index * 30,
+      end_seconds: index * 30 + 30,
+      start_time: chapter.time || secondsToTime(index * 30),
+      end_time: secondsToTime(index * 30 + 30),
+      captions: [],
+      text: chapter.summary || chapter.title || "",
+      summary: chapter.summary || chapter.title || "",
+    }))
+    .filter((item) => item.summary || item.text);
+
+  if (chapterCaptions.length) return chapterCaptions;
+
+  return asArray(generated.key_points).slice(0, 8).map((point, index) => ({
+    start_seconds: index * 30,
+    end_seconds: index * 30 + 30,
+    start_time: secondsToTime(index * 30),
+    end_time: secondsToTime(index * 30 + 30),
+    captions: [],
+    text: String(point),
+    summary: String(point),
+  }));
+}
+
+function fallbackTranscriptNotes(generated) {
+  return [
+    generated.summary,
+    asArray(generated.key_points).length ? `Key points:\n${asArray(generated.key_points).map((item) => `- ${item}`).join("\n")}` : "",
+    asArray(generated.action_items).length ? `Actions:\n${asArray(generated.action_items).map((item) => `- ${item}`).join("\n")}` : "",
+    generated.transcript_notes,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -643,10 +698,11 @@ app.post("/api/summarize", requireUser, async (req, res, next) => {
         channel: "",
         duration: null,
         thumbnail: videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : "",
-        transcript: "",
+        transcript: fallbackTranscriptNotes(generated),
         caption_segments: [],
         caption_windows: [],
       };
+      captionSummaries = fallbackCaptionSummaries(generated);
     }
 
     const result = await db(
