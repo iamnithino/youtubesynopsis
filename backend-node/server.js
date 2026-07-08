@@ -845,7 +845,26 @@ app.post("/api/presentations/improve-slide", requireUser, async (req, res) => {
 app.get("/api/admin/users", requireUser, requireAdmin, async (_req, res, next) => {
   try {
     const users = await db("SELECT * FROM users ORDER BY id DESC");
-    res.json(users.rows.map((user) => ({ ...serializeUser(user), usage: { summaries: 0, comparisons: 0, presentations: 0, total_requests: 0 } })));
+    res.json(users.rows.map((user) => ({
+      ...serializeUser(user),
+      usage: {
+        summaries: 0,
+        comparisons: 0,
+        presentations: 0,
+        total_requests: 0,
+        last_activity: null,
+        web_usage: {
+          summary_urls: [],
+          comparisons: [],
+        },
+        work: {
+          summaries: [],
+          comparisons: [],
+          presentations: [],
+          recent_activity: [],
+        },
+      },
+    })));
   } catch (error) {
     next(error);
   }
@@ -857,7 +876,26 @@ app.get("/api/admin/usage", requireUser, requireAdmin, async (_req, res, next) =
     const summaries = await db("SELECT count(*)::int AS count FROM summaries");
     res.json({
       totals: { users: users.rows.length, summaries: summaries.rows[0].count, comparisons: 0, presentations: 0, total_requests: summaries.rows[0].count },
-      users: users.rows.map((user) => ({ ...serializeUser(user), usage: { summaries: 0, comparisons: 0, presentations: 0, total_requests: 0 } })),
+      users: users.rows.map((user) => ({
+        ...serializeUser(user),
+        usage: {
+          summaries: 0,
+          comparisons: 0,
+          presentations: 0,
+          total_requests: 0,
+          last_activity: null,
+          web_usage: {
+            summary_urls: [],
+            comparisons: [],
+          },
+          work: {
+            summaries: [],
+            comparisons: [],
+            presentations: [],
+            recent_activity: [],
+          },
+        },
+      })),
     });
   } catch (error) {
     next(error);
