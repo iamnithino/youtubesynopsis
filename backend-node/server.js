@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import pg from "pg";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -16,6 +17,13 @@ const getSubtitles = namedGetSubtitles || captionExtractor.getSubtitles;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 const AI_BASE_URL = process.env.AI_BASE_URL || "https://api.cerebras.ai/v1";
 const MAX_TRANSCRIPT_CHARS = Number(process.env.MAX_TRANSCRIPT_CHARS || 45000);
+const GEMINI_API_KEY = (
+  process.env.GEMINI_API_KEY ||
+  process.env.GOOGLE_API_KEY ||
+  process.env.GOOGLE_GENAI_API_KEY ||
+  ""
+).trim();
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const PROXY_URL = (
   process.env.WEBSHARE_PROXY_URL ||
   process.env.HTTPS_PROXY ||
@@ -68,6 +76,7 @@ const cerebras = new OpenAI({
   apiKey: process.env.CEREBRAS_API_KEY || "missing-key",
   baseURL: AI_BASE_URL,
 });
+const gemini = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 function modelList() {
   return (process.env.CEREBRAS_MODELS || process.env.AI_MODEL || "gpt-oss-120b,llama-3.3-70b,llama3.1-8b")
@@ -460,6 +469,56 @@ async function generateSummaryFeatures(transcript, mode = "normal", customPrompt
   };
 }
 
+async function generateDirectYouTubeSummary(youtubeUrl, mode = "normal", customPrompt = "", outputLanguage = "English") {
+  if (!gemini) {
+    throw Object.assign(
+      new Error("YouTube captions were blocked and GEMINI_API_KEY is not set for direct YouTube fallback."),
+      { statusCode: 502 },
+    );
+  }
+
+  const guidance = customPrompt || mode || "normal";
+  const prompt =
+    `Analyze this YouTube video directly and write in ${outputLanguage}. Purpose/mode: ${guidance}.\n` +
+    "Return only valid JSON with keys: title, summary, keywords, chapters, key_points, questions, action_items.\n" +
+    "summary: clear markdown summary. keywords: 6 strings. chapters: 4-8 objects with title,time,summary. " +
+    "key_points: 6-10 strings. questions: 5 objects with type,question,answer,options,correct_answer. " +
+    "action_items: 3-8 strings. If exact timestamps are unavailable, use approximate chapter labels.";
+
+  const response = await gemini.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            fileData: {
+              mimeType: "video/mp4",
+              fileUri: youtubeUrl,
+            },
+          },
+          { text: prompt },
+        ],
+      },
+    ],
+    config: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+    },
+  });
+
+  const data = jsonFromText(response.text || "");
+  return {
+    title: data.title || "YouTube Video",
+    summary: data.summary || "Summary generated from the YouTube video.",
+    keywords: asArray(data.keywords),
+    chapters: asArray(data.chapters),
+    key_points: asArray(data.key_points),
+    questions: asArray(data.questions),
+    action_items: asArray(data.action_items),
+  };
+}
+
 function summarizeWindows(windows) {
   return windows.slice(0, 120).map((window) => ({
     ...window,
@@ -477,7 +536,13 @@ app.get("/api/health", async (_req, res) => {
   } catch {
     database = "error";
   }
-  res.json({ status: "ok", runtime: "node", database, proxy_enabled: Boolean(PROXY_URL) });
+  res.json({
+    status: "ok",
+    runtime: "node",
+    database,
+    proxy_enabled: Boolean(PROXY_URL),
+    gemini_fallback_enabled: Boolean(GEMINI_API_KEY),
+  });
 });
 
 app.post("/api/auth/register", async (req, res, next) => {
@@ -533,9 +598,29 @@ app.post("/api/summarize", requireUser, async (req, res, next) => {
   try {
     const youtubeUrl = req.body.youtube_url;
     const language = req.body.output_language || "English";
-    const video = await fetchTranscript(youtubeUrl, language);
-    const captionSummaries = summarizeWindows(video.caption_windows || []);
-    const generated = await generateSummaryFeatures(video.transcript, req.body.mode, req.body.custom_prompt, language);
+    const videoId = extractYouTubeId(youtubeUrl);
+    let video;
+    let captionSummaries = [];
+    let generated;
+
+    try {
+      video = await fetchTranscript(youtubeUrl, language);
+      captionSummaries = summarizeWindows(video.caption_windows || []);
+      generated = await generateSummaryFeatures(video.transcript, req.body.mode, req.body.custom_prompt, language);
+    } catch (transcriptError) {
+      console.warn(`[Summarize] Caption path failed, trying Gemini direct fallback: ${transcriptError.message}`);
+      generated = await generateDirectYouTubeSummary(youtubeUrl, req.body.mode, req.body.custom_prompt, language);
+      video = {
+        title: generated.title || "YouTube Video",
+        channel: "",
+        duration: null,
+        thumbnail: videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : "",
+        transcript: "",
+        caption_segments: [],
+        caption_windows: [],
+      };
+    }
+
     const result = await db(
       `INSERT INTO summaries
        (user_id, youtube_url, title, channel, duration, thumbnail, transcript, caption_segments, caption_summaries,

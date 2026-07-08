@@ -18,6 +18,10 @@ services:
         sync: false
       - key: CEREBRAS_MODELS
         value: gpt-oss-120b,llama-3.3-70b,llama3.1-8b
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
       - key: JWT_SECRET
         generateValue: true
       - key: ADMIN_EMAIL
