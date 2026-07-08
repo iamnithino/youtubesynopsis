@@ -23,7 +23,14 @@ const GEMINI_API_KEY = (
   process.env.GOOGLE_GENAI_API_KEY ||
   ""
 ).trim();
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODELS = (
+  process.env.GEMINI_MODELS ||
+  process.env.GEMINI_MODEL ||
+  "gemini-2.0-flash,gemini-1.5-flash,gemini-2.5-flash"
+)
+  .split(",")
+  .map((model) => model.trim())
+  .filter(Boolean);
 const PROXY_URL = (
   process.env.WEBSHARE_PROXY_URL ||
   process.env.HTTPS_PROXY ||
@@ -485,27 +492,48 @@ async function generateDirectYouTubeSummary(youtubeUrl, mode = "normal", customP
     "key_points: 6-10 strings. questions: 5 objects with type,question,answer,options,correct_answer. " +
     "action_items: 3-8 strings. If exact timestamps are unavailable, use approximate chapter labels.";
 
-  const response = await gemini.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: [
-      {
-        role: "user",
-        parts: [
+  let response;
+  const errors = [];
+  for (const model of GEMINI_MODELS) {
+    try {
+      response = await gemini.models.generateContent({
+        model,
+        contents: [
           {
-            fileData: {
-              mimeType: "video/mp4",
-              fileUri: youtubeUrl,
-            },
+            role: "user",
+            parts: [
+              {
+                fileData: {
+                  mimeType: "video/mp4",
+                  fileUri: youtubeUrl,
+                },
+              },
+              { text: prompt },
+            ],
           },
-          { text: prompt },
         ],
-      },
-    ],
-    config: {
-      temperature: 0.2,
-      responseMimeType: "application/json",
-    },
-  });
+        config: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+        },
+      });
+      break;
+    } catch (error) {
+      const message = error?.message || String(error);
+      errors.push(`${model}: ${message}`);
+      console.error(`[Gemini fallback] ${model} failed: ${message}`);
+    }
+  }
+
+  if (!response) {
+    throw Object.assign(
+      new Error(
+        "Gemini direct YouTube fallback failed. Check that GEMINI_API_KEY is from Google AI Studio and that the Gemini API is enabled. " +
+          errors.join(" | "),
+      ),
+      { statusCode: 502 },
+    );
+  }
 
   const data = jsonFromText(response.text || "");
   return {
